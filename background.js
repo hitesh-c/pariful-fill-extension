@@ -5,6 +5,7 @@ function createDefaultSettings() {
       fullName: '',
       linkedin: '',
       company: '',
+      title: '',
       industry: '',
       startupBlurb: '',
       achievement: '',
@@ -16,14 +17,15 @@ function createDefaultSettings() {
     rsvp: {
       choice: 'going',
       attendeeLabel: '1 attendee',
-      autoSubmit: false,
+      rsvpOpenDelay: 6000,
+      autoSubmit: true,
       submitDelay: 1000,
       includeComment: false
     },
     automation: {
       eventList: [],
       maxConcurrent: 1,
-      visitDuration: 5000,
+      visitDuration: 120000,
       keepTabsOpen: false,
       makeTabsVisible: false,
       status: 'idle',
@@ -201,7 +203,7 @@ async function startAutomation() {
   automationState.status = 'running';
   automationState.queue = eventList.map((url, index) => ({ url, status: 'pending', index, attempts: 0 }));
   automationState.maxConcurrent = Math.max(1, settings.automation.maxConcurrent || 1);
-  automationState.visitDuration = Math.max(1000, settings.automation.visitDuration || 5000);
+  automationState.visitDuration = Math.max(120000, settings.automation.visitDuration || 120000);
   automationState.keepTabsOpen = Boolean(settings.automation.keepTabsOpen);
   automationState.makeTabsVisible = Boolean(settings.automation.makeTabsVisible);
 
@@ -242,7 +244,7 @@ async function clearAutomation() {
 async function refreshAutomationConfig() {
   const settings = await getSettings();
   automationState.maxConcurrent = Math.max(1, settings.automation.maxConcurrent || 1);
-  automationState.visitDuration = Math.max(1000, settings.automation.visitDuration || 5000);
+  automationState.visitDuration = Math.max(120000, settings.automation.visitDuration || 120000);
   automationState.keepTabsOpen = Boolean(settings.automation.keepTabsOpen);
   automationState.makeTabsVisible = Boolean(settings.automation.makeTabsVisible);
 }

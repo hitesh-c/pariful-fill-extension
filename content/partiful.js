@@ -1,469 +1,426 @@
 (() => {
-  const processedForms = new WeakSet();
-  const processedModals = new WeakSet();
   let settings = null;
-  let automationReported = false;
   let fillTracker = null;
+  let flowStarted = false;
+  let automationReported = false;
+  let phase = "booting";
 
-  const init = async () => {
-    console.log('[Partiful Auto Apply] Content script initialized on:', window.location.href);
-    settings = await fetchSettings();
-    console.log('[Partiful Auto Apply] Settings loaded:', settings);
-    fillTracker = createFillTracker();
-    
-    // Wait for page to fully load
-    if (document.readyState === 'loading') {
-      console.log('[Partiful Auto Apply] Waiting for page to load...');
-      await new Promise(resolve => {
-        document.addEventListener('DOMContentLoaded', resolve);
-      });
-    }
-    
-    console.log('[Partiful Auto Apply] Page loaded, starting observation');
-    observeDom();
-    
-    // Initial scan after a brief delay to let React render
-    setTimeout(() => {
-      console.log('[Partiful Auto Apply] Running initial scan');
-      scan();
-    }, 1000);
-    
-    setTimeout(() => {
-      if (!automationReported && settings && settings.automation?.status === 'running') {
-        const hasActivity = fillTracker.rsvpChoice || fillTracker.questionsFilled > 0;
-        if (!hasActivity) {
-          console.log('[Partiful Auto Apply] Timeout - no activity detected');
-          fillTracker.details.push('Timeout: No RSVP button or questionnaire found');
-          notifyAutomation('No action taken - event may have unusual layout', { closeTab: true });
-        }
-      }
-    }, 6000);
-  };
+  const MAX_WAIT = 90000;
+  const POLL_MS = 250;
 
-  function createFillTracker() {
+  function createTracker() {
     return {
       rsvpChoice: false,
       rsvpAttendee: false,
-      rsvpComment: false,
       questionsFilled: 0,
       questionsSkipped: 0,
       questionsFailed: 0,
+      missingRequired: [],
       dropdownsFailed: [],
       details: []
     };
   }
 
-  async function fetchSettings() {
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'settings:get' }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.warn('Failed to fetch settings', chrome.runtime.lastError);
-          resolve(createEmptySettings());
-        } else {
-          resolve(response?.settings || createEmptySettings());
-        }
+  async function init() {
+    if (flowStarted) return;
+    flowStarted = true;
+    fillTracker = createTracker();
+
+    settings = await fetchSettings();
+    if (document.readyState === "loading") {
+      await new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+    }
+
+    observeDom();
+
+    const delay = Math.max(0, Number(settings?.rsvp?.rsvpOpenDelay ?? 6000));
+    phase = "waiting_for_auth";
+    fillTracker.details.push("Waiting " + delay + "ms for Partiful authentication/session to settle.");
+
+    setTimeout(() => {
+      runFlow().catch((error) => {
+        console.error("[Partiful Auto Apply] Flow error", error);
+        fail("Automation error: " + (error?.message || String(error)));
       });
-    });
-  }
-
-  function createEmptySettings() {
-    return {
-      profile: {
-        email: '',
-        fullName: '',
-        linkedin: '',
-        company: '',
-        industry: '',
-        startupBlurb: '',
-        achievement: '',
-        ask: '',
-        rsvpComment: ''
-      },
-      dropdowns: getDefaultDropdownRules(),
-      questions: getDefaultQuestionRules(),
-      rsvp: {
-        choice: 'going',
-        attendeeLabel: '1 attendee',
-        autoSubmit: false,
-        submitDelay: 1000,
-        includeComment: false
-      },
-      automation: {
-        eventList: [],
-        maxConcurrent: 1,
-        visitDuration: 5000,
-        status: 'idle',
-        progress: [],
-        log: []
-      }
-    };
-  }
-
-  function getDefaultDropdownRules() {
-    return [
-      {
-        id: 'job-title',
-        title: 'Job title',
-        matchers: ['what is your job title', 'job title'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'stage',
-        title: 'Stage',
-        matchers: ['what stage', 'stage?'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'fundraising',
-        title: 'Raised / ticket size',
-        matchers: ['how much have you raised', 'ticket size'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'arr',
-        title: 'ARR',
-        matchers: ['arr', 'annual recurring revenue'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'volunteer',
-        title: 'Volunteer interest',
-        matchers: ['volunteer', 'help with this event'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'sponsor',
-        title: 'Sponsorship interest',
-        matchers: ['sponsor this event', 'sponsoring this event'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'host-linkedin',
-        title: 'Add host on LinkedIn',
-        matchers: ['please add me linkedin', 'add me linkedin', 'approval rate'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'ticket-purchase',
-        title: 'Ticket purchase acknowledgement',
-        matchers: ['people who purchase tickets'],
-        preferred: '',
-        fallbacks: []
-      },
-      {
-        id: 'follow-linkedin',
-        title: 'Follow on LinkedIn',
-        matchers: ['are you following us on linkedin'],
-        preferred: '',
-        fallbacks: []
-      }
-    ];
-  }
-
-  function getDefaultQuestionRules() {
-    return [
-      {
-        id: 'nachonacho',
-        matchType: 'contains',
-        pattern: 'nachonacho.com',
-        answerType: 'text',
-        value: ''
-      },
-      {
-        id: 'whatsapp-group',
-        matchType: 'contains',
-        pattern: 'whatsapp group',
-        answerType: 'text',
-        value: ''
-      },
-      {
-        id: 'raised-capital',
-        matchType: 'contains',
-        pattern: 'have you raised capital',
-        answerType: 'text',
-        value: ''
-      }
-    ];
+    }, delay);
   }
 
   function observeDom() {
     const observer = new MutationObserver(() => {
-      scan();
+      if (phase === "waiting_for_auth" || phase === "waiting_for_rsvp" || phase === "waiting_for_modal" ||
+          phase === "waiting_for_continue" || phase === "waiting_for_questionnaire" ||
+          phase === "waiting_for_verification" || phase === "filling_questionnaire") {
+        pump();
+      }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  function scan() {
-    tryOpenRsvpModal();
-    tryHandleRsvpModal();
-    tryHandleQuestionnaire();
+  let pumpScheduled = false;
+  function pump() {
+    if (pumpScheduled) return;
+    pumpScheduled = true;
+    setTimeout(() => {
+      pumpScheduled = false;
+      // Intentionally lightweight; the main flow performs deterministic waits.
+    }, 25);
   }
 
-  function tryOpenRsvpModal() {
-    const modal = document.querySelector('#guest-rsvp-dialog');
-    if (modal) return;
-    
-    if (processedModals.has(document.body)) return;
-    
-    console.log('[Partiful Auto Apply] Searching for RSVP button...');
-    
-    // Try multiple methods to find RSVP button
-    let rsvpButton = null;
-    
-    // Method 1: Search by text
-    const buttonTexts = ['RSVP', 'Respond', "I'm Going", 'Join', 'Reply', 'Get on the list'];
-    for (const text of buttonTexts) {
-      rsvpButton = findElementByText(
-        document.body, 
-        ['button', '[role="button"]', 'a'], 
-        text
-      );
-      if (rsvpButton) {
-        console.log(`[Partiful Auto Apply] Found button with text: ${text}`);
-        break;
-      }
-    }
-    
-    // Method 2: Search by partial class name, as text can fail
-    if (!rsvpButton) {
-      rsvpButton = document.querySelector('[class*="EventPage_rsvpSection"] button') || document.querySelector('[class*="RsvpActions_singleButton"]');
-      if (rsvpButton) {
-        console.log('[Partiful Auto Apply] Found button via partial class name search.');
-      }
-    }
-
-    // Method 3: Fallback search for any button containing "rsvp"
-    if (!rsvpButton) {
-      const allButtons = document.querySelectorAll('button, [role="button"], a');
-      rsvpButton = Array.from(allButtons).find(btn => 
-        (btn.textContent || '').toLowerCase().includes('rsvp') || 
-        (btn.getAttribute('aria-label') || '').toLowerCase().includes('rsvp')
-      );
-      if (rsvpButton) {
-        console.log('[Partiful Auto Apply] Found button via generic contains search');
-      }
-    }
-    
-    if (rsvpButton && isElementVisible(rsvpButton)) {
-      console.log('[Partiful Auto Apply] Clicking RSVP button:', rsvpButton.textContent.trim());
-      
-      // Visual confirmation for debugging
-      rsvpButton.style.border = '3px dashed red';
-      rsvpButton.style.backgroundColor = '#ffcccc';
-      
-      fillTracker.details.push('Clicking RSVP button to open modal');
-      
-      setTimeout(() => {
-        rsvpButton.click();
-        processedModals.add(document.body);
-        setTimeout(() => scan(), 500);
-      }, 200); // Short delay to make the highlight visible
-
-    } else if (!rsvpButton) {
-      console.log('[Partiful Auto Apply] No RSVP button found on page');
-      console.log('[Partiful Auto Apply] Page buttons:', Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()));
-    } else {
-      console.log('[Partiful Auto Apply] RSVP button found but not visible');
-    }
-  }
-
-  function tryHandleRsvpModal() {
-    const modal = document.querySelector('#guest-rsvp-dialog');
-    if (!modal || processedModals.has(modal)) return;
+  async function runFlow() {
     if (!settings) return;
-    handleRsvpModal(modal);
-    processedModals.add(modal);
+
+    phase = "waiting_for_rsvp";
+    const rsvpButton = await waitFor(findRsvpButton, MAX_WAIT);
+    if (!rsvpButton) {
+      fail("Could not find the RSVP button after waiting for authentication.");
+      return;
+    }
+
+    phase = "clicking_rsvp";
+    fillTracker.details.push("Clicking RSVP after authentication delay.");
+    safeClick(rsvpButton);
+
+    phase = "waiting_for_modal";
+    const modal = await waitFor(findRsvpModal, 30000);
+    if (!modal) {
+      if (isVerificationStep()) {
+        await waitFor(() => !isVerificationStep(), MAX_WAIT);
+      }
+      const completed = await waitFor(isRegistrationComplete, 5000);
+      if (completed) {
+        complete("Registration completed after RSVP.");
+      } else {
+        fail("RSVP was clicked but the RSVP dialog did not appear.");
+      }
+      return;
+    }
+
+    await handleRsvpStep(modal);
   }
 
-  function handleRsvpModal(modal) {
-    console.log('[Partiful Auto Apply] RSVP modal detected, filling form');
-    const choiceLabel = settings.rsvp.choice === 'cant_go' ? "Can't Go" : 'Going';
-    const choiceButton = findElementByText(modal, ['button', '[role="button"]'], choiceLabel);
+  async function handleRsvpStep(modal) {
+    phase = "rsvp_step";
+    const choiceLabel = settings.rsvp.choice === "cant_go" ? "Can't Go" : "Going";
+    const choiceButton = await waitFor(() => findElementByText(
+      modal,
+      ['button', '[role="button"]'],
+      choiceLabel
+    ), 15000);
+
     if (choiceButton) {
-      console.log(`[Partiful Auto Apply] Clicking RSVP choice: ${choiceLabel}`);
-      choiceButton.click();
+      safeClick(choiceButton);
       fillTracker.rsvpChoice = true;
-      fillTracker.details.push(`Selected RSVP: ${choiceLabel}`);
-    } else {
-      console.log(`[Partiful Auto Apply] RSVP button not found: ${choiceLabel}`);
-      fillTracker.details.push(`Failed to find RSVP button: ${choiceLabel}`);
+      fillTracker.details.push("Selected RSVP choice: " + choiceLabel);
     }
 
     if (settings.rsvp.attendeeLabel) {
-      const attendeeButton = findElementByText(modal, ['button'], settings.rsvp.attendeeLabel);
-      if (attendeeButton) {
-        attendeeButton.click();
+      const attendeeButton = findElementByText(modal, ['button', '[role="button"]'], settings.rsvp.attendeeLabel);
+      if (attendeeButton && !attendeeButton.disabled) {
+        safeClick(attendeeButton);
         fillTracker.rsvpAttendee = true;
-        fillTracker.details.push(`Selected attendee: ${settings.rsvp.attendeeLabel}`);
-      } else {
-        fillTracker.details.push(`Could not find attendee option: ${settings.rsvp.attendeeLabel}`);
+        fillTracker.details.push("Selected attendee count: " + settings.rsvp.attendeeLabel);
       }
     }
 
-    if (settings.rsvp.includeComment && settings.profile.rsvpComment) {
-      const commentInput = modal.querySelector('textarea, input[type="text"]');
+    if (settings.rsvp.includeComment && settings.profile?.rsvpComment) {
+      const commentInput = modal.querySelector("textarea, input[type='text']");
       if (commentInput) {
-        const success = setInputValue(commentInput, settings.profile.rsvpComment);
-        if (success) {
-          fillTracker.rsvpComment = true;
-          fillTracker.details.push('Added RSVP comment');
-        }
+        setInputValue(commentInput, settings.profile.rsvpComment);
       }
     }
 
-    const continueButton = findElementByText(modal, ['button[type="submit"]', 'button'], 'Continue');
-    if (continueButton && settings.rsvp.autoSubmit) {
-      setTimeout(() => {
-        continueButton.click();
-        awaitQuestionnaire(4000).then((found) => {
-          if (!found) {
-            notifyAutomation('RSVP submitted automatically (no questionnaire).', { closeTab: true });
-          }
-        });
-      }, settings.rsvp.submitDelay || 0);
-    } else if (!document.querySelector('form[name="questionnaire"]')) {
-      notifyAutomation('RSVP prepared (no questionnaire).', { closeTab: settings.rsvp.autoSubmit });
+    const autoFlow = settings.automation?.status === "running" || settings.rsvp?.autoSubmit !== false;
+    if (!autoFlow) {
+      notifyAutomation("RSVP step prepared for review.", false, false);
+      return;
     }
+
+    phase = "waiting_for_continue";
+    const continueButton = await waitFor(() => findContinueButton(modal), 30000);
+
+    if (!continueButton) {
+      fail("Could not find an enabled Continue button on the RSVP step.");
+      return;
+    }
+
+    const delay = Math.max(0, Number(settings.rsvp.submitDelay ?? 1000));
+    if (delay) await sleep(delay);
+
+    safeClick(continueButton);
+    fillTracker.details.push("Clicked Continue on RSVP step.");
+
+    phase = "waiting_for_questionnaire";
+
+    const nextResult = await waitFor(() => {
+      if (isVerificationStep()) return { verification: true };
+      const form = findQuestionnaire();
+      if (form) return { form };
+      if (isRegistrationComplete()) return { complete: true };
+      return null;
+    }, MAX_WAIT);
+
+    if (!nextResult) {
+      fail("Continue was clicked, but the questionnaire did not load.");
+      return;
+    }
+
+    if (nextResult.verification) {
+      phase = "waiting_for_verification";
+      fillTracker.details.push("Verification step detected. Complete verification in the open tab.");
+      const afterVerification = await waitFor(() => {
+        if (isVerificationStep()) return null;
+        const form = findQuestionnaire();
+        if (form) return { form };
+        if (isRegistrationComplete()) return { complete: true };
+        return null;
+      }, MAX_WAIT);
+
+      if (!afterVerification) {
+        fail("Verification was not completed before the automation timeout.");
+        return;
+      }
+      if (afterVerification.complete) {
+        complete("Registration completed after verification.");
+        return;
+      }
+      await fillQuestionnaire(afterVerification.form);
+      return;
+    }
+
+    if (nextResult.complete) {
+      complete("Registration completed; no custom questionnaire was shown.");
+      return;
+    }
+
+    await fillQuestionnaire(nextResult.form);
   }
 
-  function tryHandleQuestionnaire() {
-    const forms = document.querySelectorAll('form[name="questionnaire"]');
-    forms.forEach((form) => {
-      if (processedForms.has(form)) return;
-      if (!settings) return;
-      fillQuestionnaire(form);
-      processedForms.add(form);
-    });
-  }
+  async function fillQuestionnaire(form) {
+    phase = "filling_questionnaire";
 
-  function fillQuestionnaire(form) {
-    const questions = form.querySelectorAll('.QuestionnaireForm_question__gsqZj, [data-testid="question"]');
-    console.log(`[Partiful Auto Apply] Questionnaire detected with ${questions.length} questions`);
-    questions.forEach((question) => {
-      const label = extractLabelText(question);
+    const groups = getQuestionGroups(form);
+    if (!groups.length) {
+      fail("Questionnaire loaded but no form fields could be detected.");
+      return;
+    }
+
+    fillTracker.details.push("Detected " + groups.length + " questionnaire field(s).");
+
+    for (const group of groups) {
+      const label = extractLabel(group);
       if (!label) {
         fillTracker.questionsSkipped++;
-        return;
+        continue;
       }
-      const control = question.querySelector('input, textarea, button');
-      if (!control) {
+
+      const controls = getControls(group, form);
+      if (!controls.length) {
         fillTracker.questionsSkipped++;
-        fillTracker.details.push(`Skipped "${label}" - no control found`);
-        return;
+        fillTracker.details.push('Skipped "' + label + '" — no control found.');
+        continue;
       }
 
-      const response = resolveResponse(label, control);
-      if (!response) {
+      const response = resolveResponse(label, controls[0]);
+      if (!response || response.value === "") {
         fillTracker.questionsSkipped++;
-        fillTracker.details.push(`Skipped "${label}" - no matching data`);
-        return;
+        continue;
       }
 
-      if (response.type === 'text') {
-        const input = question.querySelector('input, textarea');
-        if (input) {
-          const success = setInputValue(input, response.value);
-          if (success) {
-            fillTracker.questionsFilled++;
-            fillTracker.details.push(`Filled "${label}" with "${response.value}"`);
-          } else {
-            fillTracker.questionsFailed++;
-            fillTracker.details.push(`Failed to fill "${label}"`);
-          }
-        }
-      } else if (response.type === 'dropdown') {
-        const button = question.querySelector('button');
-        if (button) {
-          selectDropdownValue(button, response.value, response.fallbacks || [], (success, selected) => {
-            if (success) {
-              fillTracker.questionsFilled++;
-              fillTracker.details.push(`Selected "${selected}" for "${label}"`);
-            } else {
-              fillTracker.questionsFailed++;
-              fillTracker.dropdownsFailed.push(label);
-              fillTracker.details.push(`Failed to find dropdown option for "${label}"`);
-            }
-          });
-        }
+      const ok = await applyResponse(group, controls, response);
+      if (ok) {
+        fillTracker.questionsFilled++;
+        fillTracker.details.push('Filled "' + label + '".');
+      } else {
+        fillTracker.questionsFailed++;
+        fillTracker.details.push('Failed to fill "' + label + '".');
       }
-    });
+    }
 
-    const submitButton = form.querySelector('button[type="submit"], .QuestionnaireForm_actions__ZsgbP button[type="submit"]');
-    if (submitButton && settings.rsvp.autoSubmit) {
-      setTimeout(() => {
-        submitButton.click();
-        notifyAutomation('Questionnaire submitted automatically.', { closeTab: true });
-      }, settings.rsvp.submitDelay || 0);
+    await sleep(300);
+
+    const missing = collectMissingRequired(form);
+    if (missing.length) {
+      fillTracker.missingRequired = missing;
+      fail("Required questions still need answers: " + missing.join(" | "));
+      return;
+    }
+
+    const submitButton = findQuestionnaireSubmit(form);
+    if (!submitButton) {
+      fail("All detected fields are filled, but the questionnaire submit button was not found.");
+      return;
+    }
+
+    await sleep(Math.max(0, Number(settings.rsvp.submitDelay ?? 1000)));
+    if (submitButton.disabled) {
+      fail("Questionnaire submit button is disabled after filling the form.");
+      return;
+    }
+
+    safeClick(submitButton);
+    fillTracker.details.push("Submitted questionnaire.");
+
+    const completed = await waitFor(() => {
+      if (isRegistrationComplete()) return true;
+      return !findQuestionnaire();
+    }, 15000);
+
+    if (completed) {
+      complete("Registration completed successfully.");
     } else {
-      notifyAutomation('Questionnaire prepared for review.', { closeTab: false });
+      fail("The questionnaire was submitted, but completion could not be confirmed.");
     }
   }
 
-  function extractLabelText(question) {
-    const label = question.querySelector('span');
-    if (!label) return '';
-    return label.textContent.replace(/\s+/g, ' ').trim();
+  function getQuestionGroups(form) {
+    const selectors = [
+      "[data-testid='question']",
+      ".QuestionnaireForm_question__gsqZj",
+      "fieldset"
+    ];
+
+    const groups = [];
+    const seen = new Set();
+
+    for (const selector of selectors) {
+      for (const node of form.querySelectorAll(selector)) {
+        if (!node.offsetParent && !node.querySelector("input,textarea,select,[role='combobox']")) continue;
+        const key = node;
+        if (!seen.has(key)) {
+          seen.add(key);
+          groups.push(node);
+        }
+      }
+    }
+
+    const controls = form.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], button[aria-haspopup='listbox'], button[data-testid*='select' i]");
+    for (const control of controls) {
+      const group = control.closest("[data-testid='question'], .QuestionnaireForm_question__gsqZj, fieldset, label") || control.parentElement;
+      if (group && !seen.has(group)) {
+        seen.add(group);
+        groups.push(group);
+      }
+    }
+
+    return groups;
+  }
+
+  function getControls(group, form) {
+    const own = [...group.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], button[aria-haspopup='listbox'], button[data-testid*='select' i]")];
+    if (own.length) return own;
+
+    if (group.matches("input,textarea,select,[role='combobox'],button[aria-haspopup='listbox'],button[data-testid*='select' i]")) return [group];
+
+    return [];
+  }
+
+  function extractLabel(group) {
+    const control = group.matches("input,textarea,select,[role='combobox'],button[aria-haspopup='listbox'],button[data-testid*='select' i']")
+      ? group
+      : group.querySelector("input:not([type='hidden']), textarea, select, [role='combobox']");
+
+    if (!control) return "";
+
+    const labelledBy = control.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" ");
+      if (text.trim()) return cleanLabel(text);
+    }
+
+    const explicitLabel = control.id
+      ? document.querySelector('label[for="' + CSS.escape(control.id) + '"]')
+      : null;
+    if (explicitLabel) return cleanLabel(explicitLabel.textContent);
+
+    const wrappingLabel = control.closest("label");
+    if (wrappingLabel) return cleanLabel(wrappingLabel.textContent);
+
+    const labelNode = group.querySelector("label, legend");
+    if (labelNode) return cleanLabel(labelNode.textContent);
+
+    const dataQuestion = group.querySelector("[data-question], [aria-label]");
+    if (dataQuestion && dataQuestion !== control) {
+      return cleanLabel(
+        dataQuestion.getAttribute("data-question") ||
+        dataQuestion.getAttribute("aria-label") ||
+        dataQuestion.textContent
+      );
+    }
+
+    const textNodes = [...group.querySelectorAll("span, p, div")].slice(0, 5);
+    for (const node of textNodes) {
+      const text = cleanLabel(node.textContent);
+      if (text && text.length <= 500) return text;
+    }
+
+    return cleanLabel(
+      control.getAttribute("aria-label") ||
+      control.getAttribute("placeholder") ||
+      ""
+    );
+  }
+
+  function cleanLabel(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .replace(/\s*\*+\s*$/g, "")
+      .trim();
+  }
+
+  function normalize(value) {
+    return cleanLabel(value)
+      .toLowerCase()
+      .replace(/[’']/g, "'")
+      .replace(/[^a-z0-9+@.\- ]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   function resolveResponse(label, control) {
-    const normalized = label.toLowerCase();
-    console.log(`[Partiful Auto Apply] Resolving response for question: "${label}"`);
+    const normalized = normalize(label);
 
     const custom = findCustomRule(label, normalized);
-    if (custom) {
-      console.log(`[Partiful Auto Apply] Matched custom rule:`, custom);
-      return custom;
+    if (custom) return custom;
+
+    const dropdown = findDropdownRule(label, normalized);
+    if (dropdown) return dropdown;
+
+    const profile = mapProfileValue(normalized);
+    if (profile !== "") return { type: "text", value: profile };
+
+    if (control.matches("input[type='email']") && settings.profile.email) {
+      return { type: "text", value: settings.profile.email };
     }
 
-    const fromDropdown = findDropdownRule(label, normalized);
-    if (fromDropdown) {
-      console.log(`[Partiful Auto Apply] Matched dropdown rule:`, fromDropdown);
-      return fromDropdown;
-    }
-
-    const profileValue = mapProfileValue(normalized);
-    if (profileValue) {
-      console.log(`[Partiful Auto Apply] Matched profile field:`, profileValue);
-      return { type: 'text', value: profileValue };
-    }
-
-    if (control.matches('input[type="email"]') && settings.profile.email) {
-      console.log(`[Partiful Auto Apply] Detected email field`);
-      return { type: 'text', value: settings.profile.email };
-    }
-
-    console.log(`[Partiful Auto Apply] No match found for: "${label}"`);
     return null;
   }
 
   function findCustomRule(label, normalized) {
     for (const rule of settings.questions || []) {
-      if (!rule.pattern) continue;
-      const pattern = rule.pattern.toLowerCase();
-      let matches = false;
-      if (rule.matchType === 'exact' && normalized === pattern) {
-        matches = true;
-      } else if (rule.matchType === 'contains' && normalized.includes(pattern)) {
-        matches = true;
-      } else if (rule.matchType === 'regex') {
+      if (!rule?.pattern || !rule.value) continue;
+
+      const pattern = normalize(rule.pattern);
+      let matched = false;
+
+      if (rule.matchType === "exact") {
+        matched = normalized === pattern;
+      } else if (rule.matchType === "contains") {
+        matched = normalized.includes(pattern) || pattern.includes(normalized);
+      } else if (rule.matchType === "regex") {
         try {
-          const regex = new RegExp(rule.pattern, 'i');
-          matches = regex.test(label);
-        } catch (error) {
-          console.warn('Invalid regex pattern', rule.pattern, error);
+          matched = new RegExp(rule.pattern, "i").test(label);
+        } catch {
+          matched = false;
         }
       }
-      if (matches) {
+
+      if (matched) {
         return {
-          type: rule.answerType === 'dropdown' ? 'dropdown' : 'text',
-          value: rule.value,
+          type: rule.answerType === "dropdown" ? "dropdown" : "text",
+          value: String(rule.value),
           fallbacks: []
         };
       }
@@ -472,188 +429,389 @@
   }
 
   function findDropdownRule(label, normalized) {
-    console.log(`[Partiful Auto Apply] Checking ${settings.dropdowns?.length || 0} dropdown rules for: "${label}"`);
     for (const rule of settings.dropdowns || []) {
       const matchers = rule.matchers || [];
-      console.log(`[Partiful Auto Apply] Checking rule "${rule.title}" with matchers:`, matchers);
-      if (matchers.some((matcher) => normalized.includes(matcher.toLowerCase()))) {
-        console.log(`[Partiful Auto Apply] MATCH! Rule "${rule.title}" matched. Preferred: "${rule.preferred}", Fallbacks:`, rule.fallbacks);
-        if (rule.preferred) {
-          return {
-            type: 'dropdown',
-            value: rule.preferred,
-            fallbacks: rule.fallbacks || []
-          };
-        } else {
-          console.log(`[Partiful Auto Apply] WARNING: Rule matched but no preferred value set`);
-        }
+      const matched = matchers.some((matcher) => {
+        const m = normalize(matcher);
+        return m && (normalized.includes(m) || m.includes(normalized));
+      });
+
+      if (matched && rule.preferred) {
+        return {
+          type: "dropdown",
+          value: String(rule.preferred),
+          fallbacks: rule.fallbacks || []
+        };
       }
     }
-    console.log(`[Partiful Auto Apply] No dropdown rule matched`);
     return null;
   }
 
-  function mapProfileValue(normalizedLabel) {
-    if (normalizedLabel.includes('email')) return settings.profile.email;
-    if (normalizedLabel.includes('full name') || normalizedLabel.includes('name?') || normalizedLabel.endsWith('name *')) {
-      return settings.profile.fullName;
+  function mapProfileValue(label) {
+    if (label.includes("email")) return settings.profile.email || "";
+    if (label.includes("linkedin")) return settings.profile.linkedin || "";
+    if (label.includes("company") || label.includes("organization")) return settings.profile.company || "";
+    if (
+      label.includes("job title") ||
+      label === "title" ||
+      label.includes("your title") ||
+      label.includes("role title")
+    ) return settings.profile.title || settings.profile.jobTitle || "";
+    if (label.includes("full name") || label === "name" || label.endsWith(" name")) return settings.profile.fullName || "";
+    if (label.includes("industry")) return settings.profile.industry || "";
+    if (label.includes("describe your startup") || label.includes("startup description")) return settings.profile.startupBlurb || "";
+    if (label.includes("achievement")) return settings.profile.achievement || "";
+    if (label.includes("looking for") || label.includes("what are you looking")) return settings.profile.ask || "";
+    if (label.includes("comment")) return settings.profile.rsvpComment || "";
+    return "";
+  }
+
+  async function applyResponse(group, controls, response) {
+    if (response.type === "text") {
+      const input = controls.find((c) => c.matches("input:not([type='checkbox']):not([type='radio']), textarea"));
+      if (!input) return false;
+      setInputValue(input, response.value);
+      return inputValueMatches(input, response.value);
     }
-    if (normalizedLabel.includes('linkedin')) return settings.profile.linkedin;
-    if (normalizedLabel.includes('company')) return settings.profile.company;
-    if (normalizedLabel.includes('industry')) return settings.profile.industry;
-    if (normalizedLabel.includes('describe your startup')) return settings.profile.startupBlurb;
-    if (normalizedLabel.includes('achievement')) return settings.profile.achievement;
-    if (normalizedLabel.includes('looking for')) return settings.profile.ask;
-    if (normalizedLabel.includes('comment')) return settings.profile.rsvpComment;
-    return '';
+
+    const select = controls.find((c) => c.matches("select"));
+    if (select) {
+      return selectOption(select, response.value, response.fallbacks || []);
+    }
+
+    const trigger = controls.find((c) => c.matches("[role='combobox'], button, [aria-haspopup='listbox']"));
+    if (!trigger) return false;
+
+    return await selectCustomDropdown(trigger, response.value, response.fallbacks || []);
   }
 
   function setInputValue(input, value) {
-    const previous = input.value;
-    if (previous === value) return true;
-    input.value = value;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    return input.value === value;
-  }
+    const stringValue = String(value);
+    const prototype = input instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
 
-  function selectDropdownValue(button, preferred, fallbacks, callback) {
-    button.click();
-    const candidates = [preferred, ...fallbacks].filter(Boolean);
-
-    if (!candidates.length) {
-      document.body.click();
-      if (callback) callback(false, null);
-      return;
+    if (descriptor?.set) {
+      descriptor.set.call(input, stringValue);
+    } else {
+      input.value = stringValue;
     }
 
-    const openDeadline = Date.now() + 1000;
-    const selectDeadline = Date.now() + 3000;
-    let dropdownOpened = false;
-    let selectedValue = null;
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    input.dispatchEvent(new Event("blur", { bubbles: true, composed: true }));
+  }
 
-    const waitForDropdownOpen = () => {
-      const container = locateDropdownContainer(button);
-      if (container) {
-        const options = container.querySelectorAll('li, button, [role="option"]');
-        if (options.length > 0) {
-          dropdownOpened = true;
-          setTimeout(() => trySelect(), 50);
+  function inputValueMatches(input, expected) {
+    return String(input.value || "").trim() === String(expected || "").trim();
+  }
+
+  function selectOption(select, preferred, fallbacks) {
+    const candidates = [preferred, ...(fallbacks || [])].filter(Boolean);
+    const option = [...select.options].find((o) =>
+      candidates.some((candidate) => {
+        const a = normalize(o.textContent);
+        const b = normalize(candidate);
+        return a === b || a.includes(b) || b.includes(a);
+      })
+    );
+
+    if (!option) return false;
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    if (setter) setter.call(select, option.value);
+    else select.value = option.value;
+
+    select.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    return select.value === option.value;
+  }
+
+  async function selectCustomDropdown(trigger, preferred, fallbacks) {
+    safeClick(trigger);
+    const candidates = [preferred, ...(fallbacks || [])].filter(Boolean);
+    const option = await waitFor(() => findDropdownOption(candidates), 5000);
+    if (!option) {
+      fillTracker.dropdownsFailed.push(preferred);
+      return false;
+    }
+
+    safeClick(option);
+    return true;
+  }
+
+  function findDropdownOption(candidates) {
+    const nodes = document.querySelectorAll(
+      "[role='listbox'] [role='option'], [role='listbox'] button, [data-radix-popper-content-wrapper] [role='option'], [data-radix-popper-content-wrapper] button, ul[role='listbox'] li"
+    );
+
+    for (const candidate of candidates) {
+      const c = normalize(candidate);
+      const exact = [...nodes].find((node) => normalize(node.textContent) === c && isElementVisible(node));
+      if (exact) return exact;
+      const partial = [...nodes].find((node) => normalize(node.textContent).includes(c) && isElementVisible(node));
+      if (partial) return partial;
+    }
+    return null;
+  }
+
+  function collectMissingRequired(form) {
+    const missing = [];
+    const controls = [...form.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], button[aria-haspopup='listbox'], button[data-testid*='select' i]")];
+    const radioGroups = new Set();
+
+    for (const control of controls) {
+      if (!control.required && !control.closest("[data-required='true']")) continue;
+
+      if (control.matches("input[type='radio']")) {
+        const name = control.name || "radio";
+        if (radioGroups.has(name)) continue;
+        radioGroups.add(name);
+        const group = controls.filter((c) => c.matches("input[type='radio']") && (c.name || "radio") === name);
+        if (!group.some((c) => c.checked)) {
+          missing.push(extractLabel(control.parentElement || control));
+        }
+        continue;
+      }
+
+      if (control.matches("input[type='checkbox']")) {
+        if (!control.checked) missing.push(extractLabel(control.parentElement || control));
+        continue;
+      }
+
+      const value = control.matches("select")
+        ? control.value
+        : String(control.value || "");
+
+      if (!value.trim()) {
+        missing.push(extractLabel(control.closest("[data-testid='question'], .QuestionnaireForm_question__gsqZj, fieldset, label") || control));
+      }
+    }
+
+    return [...new Set(missing.filter(Boolean))];
+  }
+
+  function findQuestionnaire() {
+    return document.querySelector("form[name='questionnaire']") ||
+      document.querySelector("form[data-testid*='questionnaire' i]") ||
+      document.querySelector(".QuestionnaireForm_question__gsqZj")?.closest("form") ||
+      null;
+  }
+
+  function findQuestionnaireSubmit(form) {
+    const buttons = form.querySelectorAll(
+      "button[type='submit'], button"
+    );
+    return [...buttons].reverse().find((button) => {
+      const text = normalize(button.textContent || "");
+      return isElementVisible(button) &&
+        !button.disabled &&
+        (button.type === "submit" || /^(submit|register|finish|continue|rsvp|done|join|confirm)/.test(text));
+    }) || null;
+  }
+
+  function findContinueButton(modal) {
+    const buttons = [...modal.querySelectorAll("button, [role='button']")];
+    return buttons.find((button) => {
+      const text = normalize(button.textContent || "");
+      return text === "continue" && isElementVisible(button) && !button.disabled;
+    }) || null;
+  }
+
+  function findRsvpModal() {
+    const known = document.querySelector("#guest-rsvp-dialog");
+    if (known && isElementVisible(known)) return known;
+
+    const dialogs = [...document.querySelectorAll("[role='dialog']")];
+    return dialogs.find((dialog) => {
+      const text = normalize(dialog.textContent);
+      return isElementVisible(dialog) && (text.includes("going") || text.includes("can't go"));
+    }) || null;
+  }
+
+  function findRsvpButton() {
+    const candidates = [...document.querySelectorAll("button, [role='button'], a")];
+    const exact = candidates.find((el) => {
+      const text = normalize(el.textContent || el.getAttribute("aria-label") || "");
+      return isElementVisible(el) && ["rsvp", "respond", "join", "get on the list"].includes(text);
+    });
+    if (exact) return exact;
+
+    const partial = candidates.find((el) => {
+      const text = normalize(el.textContent || el.getAttribute("aria-label") || "");
+      return isElementVisible(el) && text.includes("rsvp");
+    });
+    return partial || null;
+  }
+
+  function findElementByText(root, selectors, targetText) {
+    if (!root || !targetText) return null;
+    const target = normalize(targetText);
+    const elements = selectors.flatMap((selector) => [...root.querySelectorAll(selector)]);
+    const exact = elements.find((el) => isElementVisible(el) && normalize(el.textContent) === target);
+    if (exact) return exact;
+    return elements.find((el) => isElementVisible(el) && normalize(el.textContent).includes(target)) || null;
+  }
+
+  function isVerificationStep() {
+    const text = normalize(document.body?.innerText || "");
+    const phrases = [
+      "verification code",
+      "verify your phone",
+      "enter the code",
+      "code we sent",
+      "confirm your phone",
+      "check your phone"
+    ];
+    const phraseMatch = phrases.some((phrase) => text.includes(phrase));
+    const codeInputs = [...document.querySelectorAll("input")].filter((input) => {
+      const type = String(input.type || "").toLowerCase();
+      const autocomplete = String(input.autocomplete || "").toLowerCase();
+      return isElementVisible(input) &&
+        (type === "tel" || type === "number" || autocomplete.includes("one-time-code"));
+    });
+    return phraseMatch && codeInputs.length > 0;
+  }
+
+  function isRegistrationComplete() {
+    const text = normalize(document.body?.innerText || "");
+    return [
+      "you're going",
+      "youre going",
+      "you're on the list",
+      "youre on the list",
+      "registration complete",
+      "rsvp confirmed",
+      "you're confirmed",
+      "youre confirmed",
+      "see you there"
+    ].some((phrase) => text.includes(phrase));
+  }
+
+  function waitFor(factory, timeout) {
+    const deadline = Date.now() + timeout;
+    return new Promise((resolve) => {
+      const tick = () => {
+        let value = null;
+        try {
+          value = factory();
+        } catch (error) {
+          console.warn("[Partiful Auto Apply] waitFor check failed", error);
+        }
+
+        if (value) {
+          resolve(value);
           return;
         }
-      }
-      if (Date.now() < openDeadline) {
-        setTimeout(waitForDropdownOpen, 50);
-      } else {
-        setTimeout(() => trySelect(), 50);
-      }
-    };
 
-    const trySelect = () => {
-      const container = locateDropdownContainer(button) || document.body;
-      for (const candidate of candidates) {
-        const option = findElementByText(container, ['li', 'button', '[role="option"]'], candidate);
-        if (option && isElementVisible(option)) {
-          option.click();
-          selectedValue = candidate;
-          if (callback) callback(true, selectedValue);
-          return true;
+        if (Date.now() >= deadline) {
+          resolve(null);
+          return;
         }
-      }
-      if (Date.now() < selectDeadline) {
-        setTimeout(trySelect, 100);
-      } else {
-        document.body.click();
-        if (callback) callback(false, null);
-      }
-      return false;
-    };
 
-    waitForDropdownOpen();
+        setTimeout(tick, POLL_MS);
+      };
+      tick();
+    });
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function safeClick(element) {
+    if (!element || !isElementVisible(element) || element.disabled) return false;
+    element.scrollIntoView({ block: "center", behavior: "instant" });
+    element.click();
+    return true;
   }
 
   function isElementVisible(element) {
     if (!element) return false;
     const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
+    return rect.width > 0 &&
+      rect.height > 0 &&
+      getComputedStyle(element).visibility !== "hidden" &&
+      getComputedStyle(element).display !== "none";
   }
 
-  function locateDropdownContainer(button) {
-    const popups = document.querySelectorAll('[role="listbox"], .ptf-munu-[data-open="true"]');
-    if (popups.length) {
-      return popups[popups.length - 1];
-    }
-    let parent = button.parentElement;
-    for (let depth = 0; depth < 5 && parent; depth += 1) {
-      const list = parent.querySelector('[role="listbox"], ul');
-      if (list) return list;
-      parent = parent.parentElement;
-    }
-    return document.body;
-  }
-
-  function findElementByText(root, selectors, targetText) {
-    if (!root || !targetText) return null;
-    const text = targetText.replace(/\s+/g, ' ').trim().toLowerCase();
-    const elements = selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector)));
-    
-    const normalize = (str) => str.replace(/\s+/g, ' ').trim().toLowerCase();
-
-    return (
-      elements.find((el) => normalize(el.textContent) === text) ||
-      elements.find((el) => normalize(el.textContent).includes(text)) ||
-      null
-    );
-  }
-
-  function awaitQuestionnaire(timeout = 4000) {
-    return new Promise((resolve) => {
-      const end = Date.now() + timeout;
-      const check = () => {
-        if (document.querySelector('form[name="questionnaire"]')) {
-          resolve(true);
-        } else if (Date.now() > end) {
-          resolve(false);
-        } else {
-          requestAnimationFrame(check);
-        }
-      };
-      check();
-    });
-  }
-
-  function notifyAutomation(detail, options = {}) {
-    if (!settings || settings.automation?.status !== 'running') return;
+  function notifyAutomation(detail, success, closeTab) {
     if (automationReported) return;
+    if (!settings?.automation || settings.automation.status !== "running") return;
+
     automationReported = true;
 
-    const totalFilled = fillTracker.questionsFilled + (fillTracker.rsvpChoice ? 1 : 0);
-    const hasCriticalFailure = !fillTracker.rsvpChoice || fillTracker.questionsFailed > 0;
-    const success = totalFilled > 0 && !hasCriticalFailure;
-
-    const summaryDetail = [
+    const summary = [
       detail,
-      `Filled: ${fillTracker.questionsFilled} questions`,
-      `Skipped: ${fillTracker.questionsSkipped}`,
-      fillTracker.questionsFailed > 0 ? `Failed: ${fillTracker.questionsFailed}` : null,
-      fillTracker.dropdownsFailed.length > 0 ? `Missing dropdowns: ${fillTracker.dropdownsFailed.join(', ')}` : null
-    ].filter(Boolean).join(' | ');
+      "Filled: " + fillTracker.questionsFilled,
+      "Skipped: " + fillTracker.questionsSkipped,
+      fillTracker.questionsFailed ? "Failed: " + fillTracker.questionsFailed : null,
+      fillTracker.missingRequired.length ? "Missing: " + fillTracker.missingRequired.join(", ") : null,
+      fillTracker.dropdownsFailed.length ? "Dropdowns not found: " + fillTracker.dropdownsFailed.join(", ") : null
+    ].filter(Boolean).join(" | ");
 
     chrome.runtime.sendMessage({
-      type: 'automation:itemComplete',
-      success,
-      detail: summaryDetail,
+      type: "automation:itemComplete",
+      success: Boolean(success),
+      detail: summary,
       debugDetails: fillTracker.details,
-      closeTab: options.closeTab
+      closeTab: closeTab !== false
     }, () => void chrome.runtime.lastError);
   }
 
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type === 'automation:execute') {
-      init();
-    }
-  });
+  function complete(detail) {
+    phase = "completed";
+    notifyAutomation(detail, true, true);
+  }
 
-  // Run immediately for manual visits.
+  function fail(detail) {
+    phase = "failed";
+    fillTracker.details.push(detail);
+    notifyAutomation(detail, false, false);
+  }
+
+  async function fetchSettings() {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: "settings:get" }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(createEmptySettings());
+          return;
+        }
+        resolve(response?.settings || createEmptySettings());
+      });
+    });
+  }
+
+  function createEmptySettings() {
+    return {
+      profile: {
+        email: "",
+        fullName: "",
+        linkedin: "",
+        company: "",
+        title: "",
+        industry: "",
+        startupBlurb: "",
+        achievement: "",
+        ask: "",
+        rsvpComment: ""
+      },
+      dropdowns: [],
+      questions: [],
+      rsvp: {
+        choice: "going",
+        attendeeLabel: "1 attendee",
+        rsvpOpenDelay: 6000,
+        autoSubmit: true,
+        submitDelay: 1000,
+        includeComment: false
+      },
+      automation: {
+        status: "idle"
+      }
+    };
+  }
+
   init();
 })();

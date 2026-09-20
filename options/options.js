@@ -6,6 +6,7 @@
         fullName: '',
         linkedin: '',
         company: '',
+        title: '',
         industry: '',
         startupBlurb: '',
         achievement: '',
@@ -17,14 +18,15 @@
       rsvp: {
         choice: 'going',
         attendeeLabel: '1 attendee',
-        autoSubmit: false,
+        rsvpOpenDelay: 6000,
+        autoSubmit: true,
         submitDelay: 1000,
         includeComment: false
       },
       automation: {
         eventList: [],
         maxConcurrent: 1,
-        visitDuration: 5000,
+        visitDuration: 120000,
         status: 'idle',
         progress: [],
         log: []
@@ -188,7 +190,8 @@
     const form = document.getElementById('rsvp-form');
     form.elements.namedItem('choice').value = settings.rsvp.choice;
     form.elements.namedItem('attendeeLabel').value = settings.rsvp.attendeeLabel || '';
-    form.elements.namedItem('autoSubmit').checked = Boolean(settings.rsvp.autoSubmit);
+    form.elements.namedItem('rsvpOpenDelay').value = settings.rsvp.rsvpOpenDelay || 6000;
+    form.elements.namedItem('autoSubmit').checked = settings.rsvp.autoSubmit !== false;
     form.elements.namedItem('submitDelay').value = settings.rsvp.submitDelay || 1000;
     form.elements.namedItem('includeComment').checked = Boolean(settings.rsvp.includeComment);
   }
@@ -254,6 +257,7 @@
       const form = event.target;
       settings.rsvp.choice = form.elements.namedItem('choice').value;
       settings.rsvp.attendeeLabel = form.elements.namedItem('attendeeLabel').value.trim();
+      settings.rsvp.rsvpOpenDelay = Math.max(0, parseInt(form.elements.namedItem('rsvpOpenDelay').value, 10) || 0);
       settings.rsvp.autoSubmit = form.elements.namedItem('autoSubmit').checked;
       settings.rsvp.submitDelay = parseInt(form.elements.namedItem('submitDelay').value, 10) || 0;
       settings.rsvp.includeComment = form.elements.namedItem('includeComment').checked;
@@ -271,7 +275,7 @@
         .filter(Boolean);
       settings.automation.eventList = urlList;
       settings.automation.maxConcurrent = Math.max(1, parseInt(form.elements.namedItem('maxConcurrent').value, 10) || 1);
-      settings.automation.visitDuration = Math.max(1000, parseInt(form.elements.namedItem('visitDuration').value, 10) || 5000);
+      settings.automation.visitDuration = Math.max(120000, parseInt(form.elements.namedItem('visitDuration').value, 10) || 120000);
       settings.automation.keepTabsOpen = form.elements.namedItem('keepTabsOpen').checked;
       settings.automation.makeTabsVisible = form.elements.namedItem('makeTabsVisible').checked;
       await saveSettings();
