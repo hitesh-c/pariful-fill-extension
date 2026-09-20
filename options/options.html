@@ -27,6 +27,9 @@
         <label>Company name
           <input type="text" name="company" maxlength="200">
         </label>
+        <label>Job title
+          <input type="text" name="title" maxlength="200" placeholder="Founder, CEO, Engineer...">
+        </label>
         <label>Industry
           <input type="text" name="industry" maxlength="200">
         </label>
@@ -79,9 +82,13 @@
         <label>Attendee count label
           <input type="text" name="attendeeLabel" maxlength="100" placeholder="e.g. 1 attendee">
         </label>
+        <label>Delay before clicking RSVP (ms)
+          <input type="number" name="rsvpOpenDelay" min="0" step="500" value="6000">
+          <small>Allows Partiful authentication/session data to finish loading before the RSVP action.</small>
+        </label>
         <label class="inline">
           <input type="checkbox" name="autoSubmit">
-          Auto-click Continue after filling popup
+          Automatically continue and submit after filling the RSVP flow
         </label>
         <label>Submit delay (ms)
           <input type="number" name="submitDelay" min="0" step="100" value="1000">
@@ -106,8 +113,8 @@
         <label>Max concurrent tabs
           <input type="number" name="maxConcurrent" min="1" max="5" value="1">
         </label>
-        <label>Open tab stay duration (ms)
-          <input type="number" name="visitDuration" min="1000" step="500" value="5000">
+        <label>Automation timeout (ms)
+          <input type="number" name="visitDuration" min="120000" step="5000" value="120000">
         </label>
         <label class="inline">
           <input type="checkbox" name="keepTabsOpen">
