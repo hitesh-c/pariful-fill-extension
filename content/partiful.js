@@ -293,7 +293,7 @@
       }
     }
 
-    const controls = form.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox']");
+    const controls = form.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], button[aria-haspopup='listbox'], button[data-testid*='select' i]");
     for (const control of controls) {
       const group = control.closest("[data-testid='question'], .QuestionnaireForm_question__gsqZj, fieldset, label") || control.parentElement;
       if (group && !seen.has(group)) {
@@ -306,16 +306,16 @@
   }
 
   function getControls(group, form) {
-    const own = [...group.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox']")];
+    const own = [...group.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], button[aria-haspopup='listbox'], button[data-testid*='select' i]")];
     if (own.length) return own;
 
-    if (group.matches("input,textarea,select,[role='combobox']")) return [group];
+    if (group.matches("input,textarea,select,[role='combobox'],button[aria-haspopup='listbox'],button[data-testid*='select' i]")) return [group];
 
     return [];
   }
 
   function extractLabel(group) {
-    const control = group.matches("input,textarea,select,[role='combobox']")
+    const control = group.matches("input,textarea,select,[role='combobox'],button[aria-haspopup='listbox'],button[data-testid*='select' i']")
       ? group
       : group.querySelector("input:not([type='hidden']), textarea, select, [role='combobox']");
 
@@ -558,7 +558,7 @@
 
   function collectMissingRequired(form) {
     const missing = [];
-    const controls = [...form.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox']")];
+    const controls = [...form.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], button[aria-haspopup='listbox'], button[data-testid*='select' i]")];
     const radioGroups = new Set();
 
     for (const control of controls) {
